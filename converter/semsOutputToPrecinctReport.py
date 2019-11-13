@@ -25,9 +25,14 @@
 
 import sys, json, csv
 
-WRITEIN_CANDIDATE_ID = 0
-OVERVOTE_CANDIDATE_ID = 1
-UNDERVOTE_CANDIDATE_ID = 2
+WRITEIN_CANDIDATE_ID = "0"
+OVERVOTE_CANDIDATE_ID = "1"
+UNDERVOTE_CANDIDATE_ID = "2"
+
+WRITEIN_CANDIDATE = {
+    "id": WRITEIN_CANDIDATE_ID,
+    "name": "Write-Ins"
+}
 
 def create_precinct_report(election, section_name, sems_content_csv):
     contests = [c for c in election["contests"] if c["section"] == section_name]
@@ -53,12 +58,37 @@ def create_precinct_report(election, section_name, sems_content_csv):
             continue
 
         if contest_id not in contest_ids:
-            print(contest_id, contest_ids)
             continue
         
         results[precinct_id][contest_id][candidate_id] = int(count)
 
-    return results
+    # make it into a table
+    results_table = []
+
+    contest_header_row = ['']
+    candidate_header_row = ['']
+    for contest in contests:
+        contest_header_row += [contest['title']] + [''] * (len(contest["candidates"]) + 1)
+        candidate_header_row += ['Total'] + [c['name'] for c in contest["candidates"] + [WRITEIN_CANDIDATE]]
+        
+    results_table.append(contest_header_row)
+    results_table.append(candidate_header_row)    
+
+    for precinct in precincts:
+        if precinct['id'] in results:
+            result_row = [precinct['name']]
+            for contest in contests:
+                result_row.append(str(sum(results[precinct['id']][contest['id']].values())))
+
+                result_row += [
+                    str(results[precinct['id']][contest['id']][candidate["id"]]) for candidate in contest["candidates"] + [WRITEIN_CANDIDATE]
+                ]
+            results_table.append(result_row)
+    
+    return "\n".join([
+        ",".join(row) for row in results_table
+    ])
+    
 
 if __name__ == "__main__":
     election = json.loads(open(sys.argv[1],"r").read())
