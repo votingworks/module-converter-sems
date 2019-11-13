@@ -2,17 +2,12 @@
 #
 # Creates a Precinct Tally Report for Specified Contests from Vx CVR files
 #
-# python createPrecinctReport.py election.json contest_id_1 cvrs.txt cvrs2.txt cvrs3.txt > output.csv
+# python createPrecinctReport.py election.json section_name cvrs.txt cvrs2.txt cvrs3.txt > output.csv
+#
+# the section name indicates which contests to do this for.
 #
 
 import csv, io, json, sqlite3, sys
-
-NOPARTY_PARTY = {
-    "id": "0",
-    "name": "No Party",
-    "abbrev": "NP"
-}
-
 
 YESNO_CANDIDATES = [
     ## TODO
@@ -25,12 +20,12 @@ CANDIDATE_FIELDS = ["county_id", "contest_id", "candidate_id"]
 CONTEST_PRECINCTS_FIELDS = ["contest_id", "precinct_id"]
 
 
-def create_report(election_file_path, report_contest_id, cvr_path_list):
+def create_report(election_file_path, report_section_name, cvr_path_list):
     election = json.loads(open(election_file_path,"r").read())
     contests = election["contests"]
+    contests = [c for c in contests if c["section"] == report_section_name]
     ballot_styles = election["ballotStyles"]
     precincts = election["precincts"]
-    parties = election["parties"] + [NOPARTY_PARTY]
 
     county_id = election["county"]["id"]
 
@@ -84,8 +79,6 @@ def create_report(election_file_path, report_contest_id, cvr_path_list):
         sql = "insert into CVRs values (%s)" % ",".join(value_placeholders)
         c.execute(sql, [county_id, precinct_id, contest_id, answer])
 
-    contest = [c for c in contests if c["id"] == report_contest_id][0]
-        
     # insert CVRs
     for cvr_path in cvr_path_list:
         cvrs_file = open(cvr_path, "r")
@@ -97,65 +90,84 @@ def create_report(election_file_path, report_contest_id, cvr_path_list):
             cvr_obj = json.loads(cvr)
             precinct_id = cvr_obj["_precinctId"]
 
-            answers = cvr_obj.get(contest["id"], None)
+            for contest in contests:
+                answers = cvr_obj.get(contest["id"], None)
 
-            if answers != None:
-                # blank answer
-                if answers == "":
-                    continue
+                if answers != None:
+                    # blank answer
+                    if answers == "":
+                        continue
                 
-                # overvote, record only the overvote fact
-                # TODO: consider removing this since there are no overvotes in our system
-                if len(answers) > contest["seats"]: # pragma: no cover
-                    continue
+                    # overvote, record only the overvote fact
+                    # TODO: consider removing this since there are no overvotes in our system
+                    if len(answers) > contest["seats"]: # pragma: no cover
+                        continue
                 
-                for answer in answers:
-                    if answer != 'writein':
-                        add_entry(precinct_id, contest["id"], answer)
+                    for answer in answers:
+                        if answer != 'writein':
+                            add_entry(precinct_id, contest["id"], answer)
 
     # now it's all in in-memory sqlite
     report_sql = """
-    select contest_precincts.precinct_id, candidates.candidate_id, CVRs.candidate_id, count(*) as count
+    select contest_precincts.precinct_id, candidates.contest_id, candidates.candidate_id, CVRs.candidate_id, count(*) as count
     from candidates, contest_precincts
     join CVRs
     on
     candidates.contest_id = CVRs.contest_id and candidates.candidate_id = CVRs.candidate_id and contest_precincts.precinct_id = CVRs.precinct_id
     where
     candidates.contest_id = contest_precincts.contest_id
-    and candidates.contest_id = ?
-    group by contest_precincts.precinct_id, candidates.candidate_id, CVRs.candidate_id
-    order by contest_precincts.precinct_id, candidates.candidate_id
+    group by contest_precincts.precinct_id, candidates.contest_id, candidates.candidate_id, CVRs.candidate_id
+    order by contest_precincts.precinct_id, candidates.contest_id, candidates.candidate_id
     """
 
-    # keyed by Precinct, then Candidate
+    # keyed by Precinct, then Contest, then Candidate
     results = {}
+    for precinct in precincts:
+        precinct_results = {}
+        for contest in contests:
+            contest_results = {}
+            for candidate in contest["candidates"]:
+                contest_results[candidate['id']] = 0
 
-    for row in c.execute(report_sql, [report_contest_id]).fetchall():
-        precinct_id, candidate_id, CVR_candidate_id, count = row
+            precinct_results[contest['id']] = contest_results
+
+        results[precinct['id']] = precinct_results
+                
+
+    for row in c.execute(report_sql).fetchall():
+        precinct_id, contest_id, candidate_id, CVR_candidate_id, count = row
 
         precinct = [p for p in precincts if p["id"] == precinct_id][0]
+        contest = [c for c in contests if c["id"] == contest_id][0]
         candidate = [cand for cand in contest["candidates"] if cand["id"] == candidate_id][0]
 
-        if precinct['id'] not in results:
-            results[precinct['id']] = {}            
-        precinct_results = results[precinct['id']]
-
-        precinct_results[candidate['id']] = count
+        results[precinct['id']][contest['id']][candidate['id']] = count
 
     results_table = []
 
-    results_table.append(['', 'Total'] + [c['name'] for c in contest["candidates"]])
+    contest_header_row = ['']
+    candidate_header_row = ['']
+    for contest in contests:
+        contest_header_row += [contest['title']] + [''] * len(contest["candidates"])
+        candidate_header_row += ['Total'] + [c['name'] for c in contest["candidates"]]
+        
+    results_table.append(contest_header_row)
+    results_table.append(candidate_header_row)    
 
     for precinct in precincts:
         if precinct['id'] in results:
-            results_table.append([
-                precinct['name'],
-                sum(results[precinct['id']].values())
-            ] + [
-                results[precinct['id']][candidate["id"]] for candidate in contest["candidates"]
-            ])
+            result_row = [precinct['name']]
+            for contest in contests:
+                result_row.append(str(sum(results[precinct['id']][contest['id']].values())))
+
+                result_row += [
+                    str(results[precinct['id']][contest['id']][candidate["id"]]) for candidate in contest["candidates"]
+                ]
+            results_table.append(result_row)
     
-    return results_table
+    return "\n".join([
+        ",".join(row) for row in results_table
+    ])
 
 
 if __name__ == "__main__":
